@@ -1,0 +1,25 @@
+{
+  "name": "mcp-server-notion",
+  "version": "1.0.0",
+  "description": "Production-quality MCP server for Notion API v1 — databases, pages, blocks, users, comments, search",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-server-notion": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:http": "MCP_TRANSPORT=http node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0"
+  }
+}
