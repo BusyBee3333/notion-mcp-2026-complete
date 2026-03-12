@@ -119,6 +119,14 @@ Endpoints:
 | `MCP_TRANSPORT` | ❌ | `stdio` (default) or `http` |
 | `MCP_HTTP_PORT` | ❌ | HTTP port (default: 3000) |
 
+## Resources
+
+- [Notion API Reference](https://developers.notion.com/reference/intro)
+- [Create a Notion Integration](https://www.notion.so/my-integrations)
+- [Notion Block Types](https://developers.notion.com/reference/block)
+- [Notion Database Properties](https://developers.notion.com/reference/property-object)
+- [MCP Protocol Spec](https://modelcontextprotocol.io)
+
 ## License
 
 MIT
