@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 /**
  * Notion MCP Server — Production Quality
- * Implements 18 tools for Notion API v1
+ * Implements 45 tools for Notion API v1
  *
- * Tools: health_check, list_databases, get_database, query_database, create_database,
- *        get_page, create_page, update_page, archive_page,
- *        get_block, append_blocks, get_block_children, delete_block,
- *        search, get_user, list_users, create_comment, list_comments
+ * Tools: health_check,
+ *        list_databases, get_database, query_database, create_database, filter_database, sort_database, get_database_schema, update_database,
+ *        get_page, create_page, update_page, archive_page, update_page_properties, restore_page, get_page_property_item, duplicate_page,
+ *        get_block, append_blocks, get_block_children, delete_block, update_block, get_block_children_recursive,
+ *          append_code_block, append_callout_block, append_toggle_block, append_table_block,
+ *        search, search_databases_only, search_pages_only, search_by_title,
+ *        get_user, list_users,
+ *        create_comment, list_comments,
+ *        get_page_property, update_database_properties, add_database_property, remove_database_property,
+ *        get_relation_pages, update_relation, add_relation_item,
+ *        get_rollup_value,
+ *        get_workspace_info, list_integrations
  *
  * Auth: NOTION_API_KEY environment variable (Notion integration token)
  * Transport: stdio (default) or HTTP (MCP_TRANSPORT=http)
@@ -48,6 +56,10 @@ async function main() {
     import("./tools/users.js").then((m) => m.getTools(client)),
     import("./tools/search.js").then((m) => m.getTools(client)),
     import("./tools/comments.js").then((m) => m.getTools(client)),
+    import("./tools/properties.js").then((m) => m.getTools(client)),
+    import("./tools/relations.js").then((m) => m.getTools(client)),
+    import("./tools/rollups.js").then((m) => m.getTools(client)),
+    import("./tools/workspace.js").then((m) => m.getTools(client)),
   ]);
 
   // Build handler map

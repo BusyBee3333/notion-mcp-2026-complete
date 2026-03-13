@@ -1,4 +1,6 @@
-// Notion Block tools: get_block, append_blocks, get_block_children, delete_block
+// Notion Block tools: get_block, append_blocks, get_block_children, delete_block,
+//   update_block, get_block_children_recursive, append_code_block, append_callout_block,
+//   append_toggle_block, append_table_block
 import { z } from "zod";
 import type { NotionClient } from "../client.js";
 import type { ToolDefinition, ToolHandler } from "../types.js";
@@ -47,6 +49,85 @@ const GetBlockChildrenSchema = z.object({
 
 const DeleteBlockSchema = z.object({
   block_id: z.string().describe("Notion block ID to delete (permanently)"),
+});
+
+const UpdateBlockSchema = z.object({
+  block_id: z.string().describe("Notion block ID to update"),
+  block_type: z.string().describe(
+    `Block type — must match the existing block type (you cannot change a block's type). Examples: 'paragraph', 'heading_1', 'heading_2', 'heading_3', 'bulleted_list_item', 'numbered_list_item', 'to_do', 'toggle', 'code', 'quote', 'callout'`
+  ),
+  content: z.record(z.unknown()).describe(
+    `Updated block content keyed by block type. Examples:
+- Paragraph: {rich_text: [{type:'text',text:{content:'Updated text'}}]}
+- Heading: {rich_text: [{type:'text',text:{content:'New Heading'}}], color: 'default'}
+- To-do: {rich_text: [{type:'text',text:{content:'Task'}}], checked: true}
+- Code: {rich_text: [{type:'text',text:{content:'const x = 1;'}}], language: 'javascript'}
+- Callout: {rich_text: [{type:'text',text:{content:'Note!'}}], icon: {emoji: '💡'}, color: 'yellow_background'}`
+  ),
+  archived: z.boolean().optional().describe("Set to true to archive (hide) this block without deleting it"),
+});
+
+const GetBlockChildrenRecursiveSchema = z.object({
+  block_id: z.string().describe("Root block or page ID to recursively fetch all children from"),
+  max_depth: z.number().min(1).max(10).optional().default(3).describe("Maximum nesting depth to recurse into (1-10, default 3). Higher values may be slow for large pages."),
+  page_size: z.number().min(1).max(100).optional().default(50).describe("Number of blocks per API call (1-100, default 50)"),
+});
+
+const AppendCodeBlockSchema = z.object({
+  block_id: z.string().describe("Parent page or block ID to append the code block to"),
+  code: z.string().describe("Code content to display in the code block"),
+  language: z.enum([
+    "abap", "arduino", "bash", "basic", "c", "clojure", "coffeescript", "c++", "c#",
+    "css", "dart", "diff", "docker", "elixir", "elm", "erlang", "flow", "fortran",
+    "f#", "gherkin", "glsl", "go", "graphql", "groovy", "haskell", "html", "java",
+    "javascript", "json", "julia", "kotlin", "latex", "less", "lisp", "livescript",
+    "lua", "makefile", "markdown", "markup", "matlab", "mermaid", "nix", "objective-c",
+    "ocaml", "pascal", "perl", "php", "plain text", "powershell", "prolog", "protobuf",
+    "python", "r", "reason", "ruby", "rust", "sass", "scala", "scheme", "scss",
+    "shell", "sql", "swift", "typescript", "vb.net", "verilog", "vhdl", "visual basic",
+    "webassembly", "xml", "yaml", "java/c/c++/c#"
+  ]).optional().default("plain text").describe("Programming language for syntax highlighting"),
+  caption: z.string().optional().describe("Optional caption text for the code block"),
+  after: z.string().optional().describe("ID of existing block to insert after (default: end of parent)"),
+});
+
+const AppendCalloutBlockSchema = z.object({
+  block_id: z.string().describe("Parent page or block ID to append the callout to"),
+  text: z.string().describe("Text content of the callout"),
+  icon_emoji: z.string().optional().default("💡").describe("Emoji icon for the callout (default: 💡). E.g. '⚠️', '📌', '✅', '❌', '📝'"),
+  color: z.enum([
+    "default", "gray", "brown", "orange", "yellow", "green", "blue", "purple", "pink", "red",
+    "gray_background", "brown_background", "orange_background", "yellow_background",
+    "green_background", "blue_background", "purple_background", "pink_background", "red_background"
+  ]).optional().default("default").describe("Background color for the callout (default: default)"),
+  after: z.string().optional().describe("ID of existing block to insert after (default: end of parent)"),
+});
+
+const AppendToggleBlockSchema = z.object({
+  block_id: z.string().describe("Parent page or block ID to append the toggle block to"),
+  summary: z.string().describe("Summary/title text of the toggle (shown when collapsed)"),
+  children: z.array(blockSchema).optional().describe(
+    `Blocks to nest inside the toggle (shown when expanded). Array of Notion block objects.
+Example: [{type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:'Hidden content'}}]}}]`
+  ),
+  color: z.string().optional().describe("Text color for the toggle summary (e.g., 'default', 'gray', 'blue')"),
+  after: z.string().optional().describe("ID of existing block to insert after (default: end of parent)"),
+});
+
+const AppendTableBlockSchema = z.object({
+  block_id: z.string().describe("Parent page or block ID to append the table to"),
+  rows: z.array(z.array(z.string())).describe(
+    `Table data as 2D array of strings. First row is treated as header if has_column_header is true.
+Example (3 columns, 3 rows including header):
+[
+  ['Name', 'Status', 'Priority'],
+  ['Task A', 'Done', 'High'],
+  ['Task B', 'In Progress', 'Medium']
+]`
+  ),
+  has_column_header: z.boolean().optional().default(true).describe("Whether the first row is a header row (default: true)"),
+  has_row_header: z.boolean().optional().default(false).describe("Whether the first column is a header column (default: false)"),
+  after: z.string().optional().describe("ID of existing block to insert after (default: end of parent)"),
 });
 
 // ============ Tool Definitions ============
@@ -152,6 +233,158 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
+    {
+      name: "update_block",
+      title: "Update Block",
+      description:
+        "Update the content of an existing Notion block. You must specify the block's type and provide the updated content for that type. Block types cannot be changed — only content can be updated. Supports paragraph, heading_1/2/3, bulleted_list_item, numbered_list_item, to_do, code, quote, callout, toggle.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Notion block ID to update" },
+          block_type: { type: "string", description: "The block's type (e.g. 'paragraph', 'to_do', 'code') — must match the existing type" },
+          content: { type: "object", description: "Updated content for the block type. E.g. for paragraph: {rich_text:[{type:'text',text:{content:'Updated'}}]}" },
+          archived: { type: "boolean", description: "Set true to archive (hide) this block" },
+        },
+        required: ["block_id", "block_type", "content"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          type: { type: "string" },
+          last_edited_time: { type: "string" },
+        },
+        required: ["id", "type"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "get_block_children_recursive",
+      title: "Get Block Children Recursive",
+      description:
+        "Recursively fetch all child blocks of a Notion page or block up to a configurable depth. Returns a nested tree structure with each block and its children. Useful for reading the complete content tree of a page. Be careful with deep or wide pages — use max_depth to limit API calls.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Root page or block ID to recursively fetch" },
+          max_depth: { type: "number", description: "Max nesting depth to recurse into (1-10, default 3)" },
+          page_size: { type: "number", description: "Blocks per API call (1-100, default 50)" },
+        },
+        required: ["block_id"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string" },
+          blocks: { type: "array", items: { type: "object" } },
+          total_fetched: { type: "number" },
+          depth_reached: { type: "number" },
+        },
+        required: ["block_id", "blocks", "total_fetched"],
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "append_code_block",
+      title: "Append Code Block",
+      description:
+        "Append a formatted code block to a Notion page or block. Supports syntax highlighting for 60+ programming languages. Simpler than using append_blocks with a raw code block object.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Parent page or block ID to append to" },
+          code: { type: "string", description: "Code content to display" },
+          language: { type: "string", description: "Language for syntax highlighting (e.g. 'javascript', 'python', 'sql', 'bash', 'typescript'). Default: 'plain text'" },
+          caption: { type: "string", description: "Optional caption text" },
+          after: { type: "string", description: "Insert after this block ID (default: end)" },
+        },
+        required: ["block_id", "code"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+        },
+        required: ["results"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
+      name: "append_callout_block",
+      title: "Append Callout Block",
+      description:
+        "Append a callout (highlighted note) block to a Notion page. Callouts draw attention to important information with an icon and optional color background. Simpler than using append_blocks with a raw callout object.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Parent page or block ID to append to" },
+          text: { type: "string", description: "Text content of the callout" },
+          icon_emoji: { type: "string", description: "Emoji icon (default: 💡). E.g. '⚠️', '📌', '✅', '❌'" },
+          color: { type: "string", description: "Background color: 'default','gray','blue','green','yellow','orange','red','purple','pink', or append '_background' for background variants. Default: 'default'" },
+          after: { type: "string", description: "Insert after this block ID (default: end)" },
+        },
+        required: ["block_id", "text"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+        },
+        required: ["results"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
+      name: "append_toggle_block",
+      title: "Append Toggle Block",
+      description:
+        "Append a toggle (collapsible) block to a Notion page. Toggles have a summary visible when collapsed and optional nested children revealed when expanded. Great for FAQs, spoilers, and hierarchical content.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Parent page or block ID to append to" },
+          summary: { type: "string", description: "Text shown in the toggle header (always visible)" },
+          children: { type: "array", items: { type: "object" }, description: "Blocks nested inside the toggle (shown when expanded)" },
+          color: { type: "string", description: "Text color for summary (e.g. 'default', 'gray', 'blue')" },
+          after: { type: "string", description: "Insert after this block ID (default: end)" },
+        },
+        required: ["block_id", "summary"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+        },
+        required: ["results"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
+      name: "append_table_block",
+      title: "Append Table Block",
+      description:
+        "Append a table block to a Notion page from a 2D array of strings. Automatically creates the table with the correct number of columns and rows. The first row is treated as the header by default.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          block_id: { type: "string", description: "Parent page or block ID to append to" },
+          rows: { type: "array", items: { type: "array", items: { type: "string" } }, description: "2D array of strings. E.g. [['Name','Score'],['Alice','95'],['Bob','87']]" },
+          has_column_header: { type: "boolean", description: "First row is a header (default: true)" },
+          has_row_header: { type: "boolean", description: "First column is a header (default: false)" },
+          after: { type: "string", description: "Insert after this block ID (default: end)" },
+        },
+        required: ["block_id", "rows"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+        },
+        required: ["results"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
   ];
 
   // ============ Handlers ============
@@ -206,6 +439,197 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
       , { tool: "delete_block", block_id });
 
       const result = { success: true, deleted_id: block_id };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    update_block: async (args) => {
+      const params = UpdateBlockSchema.parse(args);
+      const body: Record<string, unknown> = {
+        [params.block_type]: params.content,
+      };
+      if (params.archived !== undefined) body.archived = params.archived;
+
+      const result = await logger.time("tool.update_block", () =>
+        client.patch(`/blocks/${params.block_id}`, body)
+      , { tool: "update_block", block_id: params.block_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    get_block_children_recursive: async (args) => {
+      const params = GetBlockChildrenRecursiveSchema.parse(args);
+      let totalFetched = 0;
+      let depthReached = 0;
+
+      const fetchBlocks = async (blockId: string, depth: number): Promise<Record<string, unknown>[]> => {
+        if (depth > params.max_depth) return [];
+        if (depth > depthReached) depthReached = depth;
+
+        const blocks: Record<string, unknown>[] = [];
+        let cursor: string | undefined;
+
+        do {
+          const queryParams = new URLSearchParams({ page_size: String(params.page_size) });
+          if (cursor) queryParams.set("start_cursor", cursor);
+
+          const response = await logger.time("tool.get_block_children_recursive.fetch", () =>
+            client.get<Record<string, unknown>>(`/blocks/${blockId}/children?${queryParams}`)
+          , { tool: "get_block_children_recursive", blockId, depth });
+
+          const results = (response.results as Record<string, unknown>[]) || [];
+          totalFetched += results.length;
+
+          for (const block of results) {
+            const enriched: Record<string, unknown> = { ...block };
+            if (block.has_children && depth < params.max_depth) {
+              enriched._children = await fetchBlocks(block.id as string, depth + 1);
+            }
+            blocks.push(enriched);
+          }
+
+          cursor = response.next_cursor as string | undefined;
+        } while (cursor);
+
+        return blocks;
+      };
+
+      const blocks = await fetchBlocks(params.block_id, 1);
+      const result = {
+        block_id: params.block_id,
+        blocks,
+        total_fetched: totalFetched,
+        depth_reached: depthReached,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    append_code_block: async (args) => {
+      const params = AppendCodeBlockSchema.parse(args);
+      const codeBlock: Record<string, unknown> = {
+        object: "block",
+        type: "code",
+        code: {
+          rich_text: [{ type: "text", text: { content: params.code } }],
+          language: params.language,
+          ...(params.caption ? { caption: [{ type: "text", text: { content: params.caption } }] } : {}),
+        },
+      };
+
+      const body: Record<string, unknown> = { children: [codeBlock] };
+      if (params.after) body.after = params.after;
+
+      const result = await logger.time("tool.append_code_block", () =>
+        client.patch(`/blocks/${params.block_id}/children`, body)
+      , { tool: "append_code_block", block_id: params.block_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    append_callout_block: async (args) => {
+      const params = AppendCalloutBlockSchema.parse(args);
+      const calloutBlock: Record<string, unknown> = {
+        object: "block",
+        type: "callout",
+        callout: {
+          rich_text: [{ type: "text", text: { content: params.text } }],
+          icon: { type: "emoji", emoji: params.icon_emoji },
+          color: params.color,
+        },
+      };
+
+      const body: Record<string, unknown> = { children: [calloutBlock] };
+      if (params.after) body.after = params.after;
+
+      const result = await logger.time("tool.append_callout_block", () =>
+        client.patch(`/blocks/${params.block_id}/children`, body)
+      , { tool: "append_callout_block", block_id: params.block_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    append_toggle_block: async (args) => {
+      const params = AppendToggleBlockSchema.parse(args);
+      const toggleBlock: Record<string, unknown> = {
+        object: "block",
+        type: "toggle",
+        toggle: {
+          rich_text: [{ type: "text", text: { content: params.summary } }],
+          ...(params.color ? { color: params.color } : {}),
+          ...(params.children && params.children.length > 0 ? { children: params.children } : {}),
+        },
+      };
+
+      const body: Record<string, unknown> = { children: [toggleBlock] };
+      if (params.after) body.after = params.after;
+
+      const result = await logger.time("tool.append_toggle_block", () =>
+        client.patch(`/blocks/${params.block_id}/children`, body)
+      , { tool: "append_toggle_block", block_id: params.block_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    append_table_block: async (args) => {
+      const params = AppendTableBlockSchema.parse(args);
+
+      if (!params.rows || params.rows.length === 0) {
+        throw new Error("rows must be a non-empty 2D array of strings");
+      }
+
+      const tableWidth = params.rows[0].length;
+
+      // Build table_row blocks
+      const tableRowBlocks = params.rows.map((row) => {
+        const cells = row.map((cellText) => [
+          { type: "text", text: { content: cellText } },
+        ]);
+        // Pad row to tableWidth if needed
+        while (cells.length < tableWidth) {
+          cells.push([{ type: "text", text: { content: "" } }]);
+        }
+        return {
+          type: "table_row",
+          table_row: { cells: cells.slice(0, tableWidth) },
+        };
+      });
+
+      const tableBlock: Record<string, unknown> = {
+        object: "block",
+        type: "table",
+        table: {
+          table_width: tableWidth,
+          has_column_header: params.has_column_header,
+          has_row_header: params.has_row_header,
+          children: tableRowBlocks,
+        },
+      };
+
+      const body: Record<string, unknown> = { children: [tableBlock] };
+      if (params.after) body.after = params.after;
+
+      const result = await logger.time("tool.append_table_block", () =>
+        client.patch(`/blocks/${params.block_id}/children`, body)
+      , { tool: "append_table_block", block_id: params.block_id });
+
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         structuredContent: result,

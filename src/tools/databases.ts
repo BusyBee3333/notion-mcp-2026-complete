@@ -1,4 +1,5 @@
-// Notion Database tools: list_databases, get_database, query_database, create_database
+// Notion Database tools: list_databases, get_database, query_database, create_database,
+//   filter_database, sort_database, get_database_schema, update_database
 import { z } from "zod";
 import type { NotionClient } from "../client.js";
 import type { ToolDefinition, ToolHandler } from "../types.js";
@@ -29,6 +30,62 @@ const CreateDatabaseSchema = z.object({
   title: z.string().describe("Database title"),
   properties: z.record(z.unknown()).describe("Property schema object. Must include at least a title property. Example: {Name:{title:{}},Status:{select:{options:[{name:'To Do'},{name:'Done'}]}}}"),
   is_inline: z.boolean().optional().describe("Whether database is inline in the parent page"),
+});
+
+const FilterDatabaseSchema = z.object({
+  database_id: z.string().describe("Notion database ID to filter"),
+  filter: z.record(z.unknown()).describe(
+    `Notion filter object. Supports:
+Single property filters:
+- Text/title: {property:'Name',title:{contains:'hello'}} or {property:'Notes',rich_text:{equals:'value'}}
+- Number: {property:'Score',number:{greater_than:5}} — operators: equals, does_not_equal, greater_than, less_than, greater_than_or_equal_to, less_than_or_equal_to, is_empty, is_not_empty
+- Select: {property:'Status',select:{equals:'Done'}} or {select:{is_empty:true}}
+- Multi-select: {property:'Tags',multi_select:{contains:'frontend'}}
+- Checkbox: {property:'Done',checkbox:{equals:true}}
+- Date: {property:'Due',date:{on_or_before:'2024-12-31'}} — operators: equals, before, after, on_or_before, on_or_after, past_week, past_month, past_year, next_week, next_month, next_year, is_empty, is_not_empty
+- People: {property:'Assigned',people:{contains:'user_id'}}
+- Files: {property:'Attachment',files:{is_empty:false}}
+- URL/email/phone: {property:'Website',url:{contains:'notion.so'}}
+- Relation: {property:'Project',relation:{contains:'page_id'}}
+- Formula: {property:'Formula',formula:{string:{equals:'value'}}}
+Compound filters:
+- AND: {and:[{property:'Status',select:{equals:'Done'}},{property:'Score',number:{greater_than:5}}]}
+- OR: {or:[{property:'Priority',select:{equals:'High'}},{property:'Urgent',checkbox:{equals:true}}]}`
+  ),
+  start_cursor: z.string().optional().describe("Cursor for next page"),
+  page_size: z.number().min(1).max(100).optional().default(25).describe("Results per page (1-100, default 25)"),
+});
+
+const SortDatabaseSchema = z.object({
+  database_id: z.string().describe("Notion database ID to query with sorting"),
+  sorts: z.array(z.record(z.unknown())).describe(
+    `Array of sort objects. Up to 1 sort is supported by Notion API (use compound filters to narrow results).
+Sort by property: [{property:'Name',direction:'ascending'}] or [{property:'Due Date',direction:'descending'}]
+Sort by timestamp: [{timestamp:'created_time',direction:'descending'}] or [{timestamp:'last_edited_time',direction:'ascending'}]
+direction must be 'ascending' or 'descending'.`
+  ),
+  filter: z.record(z.unknown()).optional().describe("Optional filter to apply alongside sorting. Example: {property:'Status',select:{equals:'Active'}}"),
+  start_cursor: z.string().optional().describe("Cursor for next page"),
+  page_size: z.number().min(1).max(100).optional().default(25).describe("Results per page (1-100, default 25)"),
+});
+
+const GetDatabaseSchemaSchema = z.object({
+  database_id: z.string().describe("Notion database ID (UUID format)"),
+});
+
+const UpdateDatabaseSchema = z.object({
+  database_id: z.string().describe("Notion database ID to update"),
+  title: z.string().optional().describe("New title for the database"),
+  description: z.string().optional().describe("New description text for the database"),
+  icon: z.object({
+    type: z.enum(["emoji", "external"]),
+    emoji: z.string().optional().describe("Emoji character, e.g. '📋'"),
+    external: z.object({ url: z.string() }).optional().describe("External icon URL"),
+  }).optional().describe("Database icon — emoji or external URL"),
+  cover: z.object({
+    type: z.literal("external"),
+    external: z.object({ url: z.string() }),
+  }).optional().describe("Database cover image (external URL)"),
 });
 
 // ============ Tool Definitions ============
@@ -139,6 +196,115 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
+    {
+      name: "filter_database",
+      title: "Filter Database",
+      description:
+        "Query a Notion database with a rich filter expression. Supports equality, contains, comparison, date range, empty checks, and compound AND/OR filters across all property types (text, number, select, multi_select, date, checkbox, people, relation, formula, files). Returns matching entries with pagination.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          database_id: { type: "string", description: "Notion database ID to filter" },
+          filter: {
+            type: "object",
+            description: "Notion filter object. Single: {property:'Status',select:{equals:'Done'}}. Compound: {and:[...]} or {or:[...]}. Date: {property:'Due',date:{on_or_before:'2024-12-31'}}. Number: {property:'Score',number:{greater_than:5}}.",
+          },
+          start_cursor: { type: "string", description: "Cursor for next page" },
+          page_size: { type: "number", description: "Results per page (1-100, default 25)" },
+        },
+        required: ["database_id", "filter"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+          next_cursor: { type: "string" },
+          has_more: { type: "boolean" },
+        },
+        required: ["results", "has_more"],
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "sort_database",
+      title: "Sort Database",
+      description:
+        "Query a Notion database sorted by a property or timestamp. Sort by any property (ascending or descending) or by created_time/last_edited_time. Optionally combine with a filter. Returns sorted entries with pagination.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          database_id: { type: "string", description: "Notion database ID to sort" },
+          sorts: { type: "array", items: { type: "object" }, description: "Sort array. Property sort: [{property:'Name',direction:'ascending'}]. Timestamp sort: [{timestamp:'created_time',direction:'descending'}]." },
+          filter: { type: "object", description: "Optional filter. E.g. {property:'Status',select:{equals:'Active'}}" },
+          start_cursor: { type: "string", description: "Cursor for next page" },
+          page_size: { type: "number", description: "Results per page (1-100, default 25)" },
+        },
+        required: ["database_id", "sorts"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          results: { type: "array", items: { type: "object" } },
+          next_cursor: { type: "string" },
+          has_more: { type: "boolean" },
+        },
+        required: ["results", "has_more"],
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "get_database_schema",
+      title: "Get Database Schema",
+      description:
+        "Get the property schema of a Notion database — returns all column names, types, and configuration (select options, relation targets, formula expressions, rollup configs, etc.). A focused version of get_database that highlights the schema for use when building filters, creating pages, or updating properties.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          database_id: { type: "string", description: "Notion database ID (UUID format)" },
+        },
+        required: ["database_id"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          database_id: { type: "string" },
+          title: { type: "string" },
+          properties: { type: "object" },
+          property_names: { type: "array", items: { type: "string" } },
+          property_types: { type: "object" },
+          url: { type: "string" },
+        },
+        required: ["database_id", "properties"],
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "update_database",
+      title: "Update Database",
+      description:
+        "Update a Notion database's metadata — rename it, change its description, update its icon or cover image. To update property schemas, use update_database_properties, add_database_property, or remove_database_property instead.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          database_id: { type: "string", description: "Notion database ID to update" },
+          title: { type: "string", description: "New title for the database" },
+          description: { type: "string", description: "New description text" },
+          icon: { type: "object", description: "New icon: {type:'emoji',emoji:'📋'} or {type:'external',external:{url:'https://...'}}" },
+          cover: { type: "object", description: "New cover: {type:'external',external:{url:'https://...'}}" },
+        },
+        required: ["database_id"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          title: { type: "array" },
+          last_edited_time: { type: "string" },
+        },
+        required: ["id"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
   ];
 
   // ============ Handlers ============
@@ -205,6 +371,99 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
       const result = await logger.time("tool.create_database", () =>
         client.post("/databases", body)
       , { tool: "create_database" });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    filter_database: async (args) => {
+      const params = FilterDatabaseSchema.parse(args);
+      const body: Record<string, unknown> = {
+        filter: params.filter,
+        page_size: params.page_size,
+      };
+      if (params.start_cursor) body.start_cursor = params.start_cursor;
+
+      const result = await logger.time("tool.filter_database", () =>
+        client.post(`/databases/${params.database_id}/query`, body)
+      , { tool: "filter_database", database_id: params.database_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    sort_database: async (args) => {
+      const params = SortDatabaseSchema.parse(args);
+      const body: Record<string, unknown> = {
+        sorts: params.sorts,
+        page_size: params.page_size,
+      };
+      if (params.filter) body.filter = params.filter;
+      if (params.start_cursor) body.start_cursor = params.start_cursor;
+
+      const result = await logger.time("tool.sort_database", () =>
+        client.post(`/databases/${params.database_id}/query`, body)
+      , { tool: "sort_database", database_id: params.database_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    get_database_schema: async (args) => {
+      const { database_id } = GetDatabaseSchemaSchema.parse(args);
+      const db = await logger.time("tool.get_database_schema", () =>
+        client.get<Record<string, unknown>>(`/databases/${database_id}`)
+      , { tool: "get_database_schema", database_id });
+
+      const properties = (db.properties as Record<string, Record<string, unknown>>) || {};
+      const propertyNames = Object.keys(properties);
+      const propertyTypes: Record<string, string> = {};
+      for (const [name, prop] of Object.entries(properties)) {
+        propertyTypes[name] = prop.type as string;
+      }
+
+      const titleArr = db.title as Array<{ plain_text?: string }> | undefined;
+      const titleText = titleArr?.map((t) => t.plain_text || "").join("") || "";
+
+      const structured = {
+        database_id: db.id,
+        title: titleText,
+        properties,
+        property_names: propertyNames,
+        property_types: propertyTypes,
+        url: db.url,
+        created_time: db.created_time,
+        last_edited_time: db.last_edited_time,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
+        structuredContent: structured,
+      };
+    },
+
+    update_database: async (args) => {
+      const params = UpdateDatabaseSchema.parse(args);
+      const body: Record<string, unknown> = {};
+
+      if (params.title !== undefined) {
+        body.title = [{ type: "text", text: { content: params.title } }];
+      }
+      if (params.description !== undefined) {
+        body.description = [{ type: "text", text: { content: params.description } }];
+      }
+      if (params.icon) body.icon = params.icon;
+      if (params.cover) body.cover = params.cover;
+
+      const result = await logger.time("tool.update_database", () =>
+        client.patch(`/databases/${params.database_id}`, body)
+      , { tool: "update_database", database_id: params.database_id });
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
