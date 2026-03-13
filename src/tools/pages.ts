@@ -1,5 +1,7 @@
 // Notion Page tools: get_page, create_page, update_page, archive_page,
-//   update_page_properties, restore_page, get_page_property_item, duplicate_page
+//   update_page_properties, restore_page, get_page_property_item, duplicate_page,
+//   create_page_with_content, get_full_page_content, set_page_icon, set_page_cover,
+//   move_page_to_database
 import { z } from "zod";
 import type { NotionClient } from "../client.js";
 import type { ToolDefinition, ToolHandler } from "../types.js";
@@ -83,6 +85,54 @@ const DuplicatePageSchema = z.object({
   parent_database_id: z.string().optional().describe("Parent database ID for the duplicate — use if duplicating a database entry"),
   new_title: z.string().optional().describe("Title for the duplicated page. Defaults to original title with '(Copy)' suffix."),
   include_content: z.boolean().optional().default(true).describe("Whether to copy block content (children) into the duplicate (default: true). NOTE: Only top-level blocks are copied — nested children are not recursively copied."),
+});
+
+// ============ Round 2 Schemas ============
+
+const CreatePageWithContentSchema = z.object({
+  parent_database_id: z.string().optional().describe("Parent database ID — creates a new database entry"),
+  parent_page_id: z.string().optional().describe("Parent page ID — creates a sub-page"),
+  properties: z.record(z.unknown()).optional().describe("Page properties. For database pages must match schema. For sub-pages use {title:[{text:{content:'My Page'}}]}"),
+  blocks: z.array(z.record(z.unknown())).describe(
+    "Block content to append after page creation. Array of Notion block objects. Limited to 100 blocks in one call (Notion API limit). " +
+    "Example: [{type:'heading_1',heading_1:{rich_text:[{type:'text',text:{content:'Introduction'}}]}},{type:'paragraph',paragraph:{rich_text:[{type:'text',text:{content:'Hello world'}}]}}]"
+  ),
+  icon: z.object({
+    type: z.enum(["emoji", "external"]),
+    emoji: z.string().optional(),
+    external: z.object({ url: z.string() }).optional(),
+  }).optional().describe("Page icon — emoji or external URL"),
+  cover: z.object({
+    type: z.literal("external"),
+    external: z.object({ url: z.string() }),
+  }).optional().describe("Page cover image (external URL)"),
+});
+
+const GetFullPageContentSchema = z.object({
+  page_id: z.string().describe("Notion page ID (UUID format)"),
+  max_depth: z.number().min(1).max(10).optional().default(5).describe("Maximum nesting depth for block recursion (1-10, default 5)"),
+  page_size: z.number().min(1).max(100).optional().default(50).describe("Blocks per API call (1-100, default 50)"),
+});
+
+const SetPageIconSchema = z.object({
+  page_id: z.string().describe("Notion page ID to update"),
+  icon_type: z.enum(["emoji", "external"]).describe("Icon type: 'emoji' for an emoji character, 'external' for an image URL"),
+  emoji: z.string().optional().describe("Emoji character to use as icon (when icon_type is 'emoji'). E.g. '🚀', '📝', '✅'"),
+  url: z.string().optional().describe("External image URL to use as icon (when icon_type is 'external'). Must be publicly accessible."),
+});
+
+const SetPageCoverSchema = z.object({
+  page_id: z.string().describe("Notion page ID to update"),
+  url: z.string().url().describe("External image URL for the page cover. Must be a publicly accessible image URL. E.g. 'https://images.unsplash.com/photo-...'"),
+});
+
+const MovePageToDatabaseSchema = z.object({
+  page_id: z.string().describe("Notion page ID to move"),
+  database_id: z.string().describe("Target database ID. The page will become an entry in this database."),
+  properties: z.record(z.unknown()).optional().describe(
+    "Properties to set in the new parent database. Should match the target database schema. " +
+    "If omitted, only the parent is changed — existing page properties are preserved where compatible."
+  ),
 });
 
 // ============ Tool Definitions ============
@@ -298,6 +348,143 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
+
+    // ============ Round 2 Tool Definitions ============
+
+    {
+      name: "create_page_with_content",
+      title: "Create Page With Content",
+      description:
+        "Create a new Notion page AND immediately populate it with block content in one logical operation. First creates the page (optionally in a database or as a sub-page), then appends the provided blocks. Eliminates the need for a separate append_blocks call after create_page. Returns both the created page metadata and the appended blocks.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          parent_database_id: { type: "string", description: "Parent database ID — creates a database entry" },
+          parent_page_id: { type: "string", description: "Parent page ID — creates a sub-page" },
+          properties: { type: "object", description: "Page properties matching the database schema, or title for sub-pages" },
+          blocks: {
+            type: "array",
+            items: { type: "object" },
+            description: "Block content to append. Array of Notion block objects (up to 100). E.g. [{type:'heading_1',heading_1:{rich_text:[{type:'text',text:{content:'Hello'}}]}}]",
+          },
+          icon: { type: "object", description: "Page icon: {type:'emoji',emoji:'🚀'} or {type:'external',external:{url:'https://...'}}" },
+          cover: { type: "object", description: "Cover image: {type:'external',external:{url:'https://...'}}" },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          page: { type: "object" },
+          blocks_appended: { type: "object" },
+          page_id: { type: "string" },
+          url: { type: "string" },
+        },
+        required: ["page", "page_id"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    {
+      name: "get_full_page_content",
+      title: "Get Full Page Content",
+      description:
+        "Fetch a page's properties AND all its block content (recursively) in a single call. Combines get_page + get_block_children_recursive into one convenient tool. Returns the page metadata, all properties, and the complete block tree. Ideal for 'read the whole page' use cases.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          page_id: { type: "string", description: "Notion page ID to read completely" },
+          max_depth: { type: "number", description: "Max nesting depth for blocks (1-10, default 5)" },
+          page_size: { type: "number", description: "Blocks per API call (1-100, default 50)" },
+        },
+        required: ["page_id"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          page: { type: "object" },
+          blocks: { type: "array", items: { type: "object" } },
+          total_blocks: { type: "number" },
+          depth_reached: { type: "number" },
+        },
+        required: ["page", "blocks", "total_blocks"],
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "set_page_icon",
+      title: "Set Page Icon",
+      description:
+        "Set or update the icon of a Notion page. Supports emoji icons (e.g. '🚀', '📝') and external image URLs. Replaces any existing icon. Works on both regular pages and database entries.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          page_id: { type: "string", description: "Notion page ID to update" },
+          icon_type: { type: "string", enum: ["emoji", "external"], description: "'emoji' for an emoji character or 'external' for an image URL" },
+          emoji: { type: "string", description: "Emoji character (when icon_type is 'emoji'). E.g. '🚀', '📝', '✅', '🎯'" },
+          url: { type: "string", description: "Image URL (when icon_type is 'external'). Must be publicly accessible." },
+        },
+        required: ["page_id", "icon_type"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          icon: { type: "object" },
+          last_edited_time: { type: "string" },
+        },
+        required: ["id"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "set_page_cover",
+      title: "Set Page Cover",
+      description:
+        "Set or update the cover image of a Notion page. Accepts any publicly accessible image URL. Replaces any existing cover. Works on both regular pages and database entries.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          page_id: { type: "string", description: "Notion page ID to update" },
+          url: { type: "string", description: "Publicly accessible image URL for the cover. E.g. 'https://images.unsplash.com/photo-...'" },
+        },
+        required: ["page_id", "url"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          cover: { type: "object" },
+          last_edited_time: { type: "string" },
+        },
+        required: ["id"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    {
+      name: "move_page_to_database",
+      title: "Move Page to Database",
+      description:
+        "Move a Notion page into a database by updating its parent. The page becomes a database entry. Optionally set properties to match the target database schema. Note: Notion API requires the page and database to be in the same workspace.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          page_id: { type: "string", description: "Notion page ID to move" },
+          database_id: { type: "string", description: "Target database ID — the page will become an entry here" },
+          properties: { type: "object", description: "Properties matching the target database schema. E.g. {Status:{select:{name:'To Do'}}}. Optional — omit to use defaults." },
+        },
+        required: ["page_id", "database_id"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          parent: { type: "object" },
+          properties: { type: "object" },
+          last_edited_time: { type: "string" },
+        },
+        required: ["id", "parent"],
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
   ];
 
   // ============ Handlers ============
@@ -490,6 +677,167 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
         ...(newPage as Record<string, unknown>),
         source_page_id: params.page_id,
       };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    // ============ Round 2 Handlers ============
+
+    create_page_with_content: async (args) => {
+      const params = CreatePageWithContentSchema.parse(args);
+
+      if (!params.parent_database_id && !params.parent_page_id) {
+        throw new Error("Either parent_database_id or parent_page_id is required");
+      }
+
+      // Step 1: Create the page
+      const pageBody: Record<string, unknown> = {};
+      if (params.parent_database_id) {
+        pageBody.parent = { type: "database_id", database_id: params.parent_database_id };
+      } else {
+        pageBody.parent = { type: "page_id", page_id: params.parent_page_id };
+      }
+      if (params.properties) pageBody.properties = params.properties;
+      if (params.icon) pageBody.icon = params.icon;
+      if (params.cover) pageBody.cover = params.cover;
+
+      const page = await logger.time("tool.create_page_with_content.create", () =>
+        client.post<Record<string, unknown>>("/pages", pageBody)
+      , { tool: "create_page_with_content" });
+
+      const pageId = page.id as string;
+
+      // Step 2: Append blocks
+      let blocksResult: Record<string, unknown> | null = null;
+      if (params.blocks && params.blocks.length > 0) {
+        blocksResult = await logger.time("tool.create_page_with_content.append", () =>
+          client.patch<Record<string, unknown>>(`/blocks/${pageId}/children`, { children: params.blocks })
+        , { tool: "create_page_with_content.append", page_id: pageId });
+      }
+
+      const result = {
+        page,
+        blocks_appended: blocksResult,
+        page_id: pageId,
+        url: page.url,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    get_full_page_content: async (args) => {
+      const params = GetFullPageContentSchema.parse(args);
+
+      // Fetch page metadata
+      const page = await logger.time("tool.get_full_page_content.page", () =>
+        client.get<Record<string, unknown>>(`/pages/${params.page_id}`)
+      , { tool: "get_full_page_content", page_id: params.page_id });
+
+      // Recursively fetch blocks
+      let totalBlocks = 0;
+      let depthReached = 0;
+
+      const fetchBlocks = async (blockId: string, depth: number): Promise<Record<string, unknown>[]> => {
+        if (depth > params.max_depth) return [];
+        if (depth > depthReached) depthReached = depth;
+
+        const blocks: Record<string, unknown>[] = [];
+        let cursor: string | undefined;
+
+        do {
+          const queryParams = new URLSearchParams({ page_size: String(params.page_size) });
+          if (cursor) queryParams.set("start_cursor", cursor);
+
+          const response = await logger.time("tool.get_full_page_content.blocks", () =>
+            client.get<Record<string, unknown>>(`/blocks/${blockId}/children?${queryParams}`)
+          , { tool: "get_full_page_content.blocks", blockId, depth });
+
+          const results = (response.results as Record<string, unknown>[]) || [];
+          totalBlocks += results.length;
+
+          for (const block of results) {
+            const enriched: Record<string, unknown> = { ...block };
+            if (block.has_children && depth < params.max_depth) {
+              enriched._children = await fetchBlocks(block.id as string, depth + 1);
+            }
+            blocks.push(enriched);
+          }
+
+          cursor = response.next_cursor as string | undefined;
+        } while (cursor);
+
+        return blocks;
+      };
+
+      const blocks = await fetchBlocks(params.page_id, 1);
+
+      const result = {
+        page,
+        blocks,
+        total_blocks: totalBlocks,
+        depth_reached: depthReached,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    set_page_icon: async (args) => {
+      const params = SetPageIconSchema.parse(args);
+
+      let icon: Record<string, unknown>;
+      if (params.icon_type === "emoji") {
+        if (!params.emoji) throw new Error("emoji is required when icon_type is 'emoji'");
+        icon = { type: "emoji", emoji: params.emoji };
+      } else {
+        if (!params.url) throw new Error("url is required when icon_type is 'external'");
+        icon = { type: "external", external: { url: params.url } };
+      }
+
+      const result = await logger.time("tool.set_page_icon", () =>
+        client.patch(`/pages/${params.page_id}`, { icon })
+      , { tool: "set_page_icon", page_id: params.page_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    set_page_cover: async (args) => {
+      const params = SetPageCoverSchema.parse(args);
+
+      const cover = { type: "external", external: { url: params.url } };
+
+      const result = await logger.time("tool.set_page_cover", () =>
+        client.patch(`/pages/${params.page_id}`, { cover })
+      , { tool: "set_page_cover", page_id: params.page_id });
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+        structuredContent: result,
+      };
+    },
+
+    move_page_to_database: async (args) => {
+      const params = MovePageToDatabaseSchema.parse(args);
+
+      const body: Record<string, unknown> = {
+        parent: { type: "database_id", database_id: params.database_id },
+      };
+      if (params.properties) body.properties = params.properties;
+
+      const result = await logger.time("tool.move_page_to_database", () =>
+        client.patch(`/pages/${params.page_id}`, body)
+      , { tool: "move_page_to_database", page_id: params.page_id, database_id: params.database_id });
 
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],

@@ -599,7 +599,6 @@ export function getTools(client: NotionClient): { tools: ToolDefinition[]; handl
         structuredContent: result,
       };
     },
-  };
 
     // ============ Round 2 Handlers ============
 

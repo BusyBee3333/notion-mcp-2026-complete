@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 /**
  * Notion MCP Server — Production Quality
- * Implements 45 tools for Notion API v1
+ * Implements 72 tools for Notion API v1
  *
  * Tools: health_check,
  *        list_databases, get_database, query_database, create_database, filter_database, sort_database, get_database_schema, update_database,
+ *          list_database_pages_with_all_filters, export_database_to_json, get_database_with_schema,
  *        get_page, create_page, update_page, archive_page, update_page_properties, restore_page, get_page_property_item, duplicate_page,
+ *          create_page_with_content, get_full_page_content, set_page_icon, set_page_cover, move_page_to_database,
  *        get_block, append_blocks, get_block_children, delete_block, update_block, get_block_children_recursive,
  *          append_code_block, append_callout_block, append_toggle_block, append_table_block,
+ *          append_image_block, append_video_block, append_embed_block, append_bookmark_block, append_link_preview_block,
+ *          append_divider_block, append_equation_block, append_file_block, append_pdf_block,
+ *          append_synced_block, append_template_block, append_breadcrumb_block, append_column_list_block,
+ *          get_all_blocks_flat,
  *        search, search_databases_only, search_pages_only, search_by_title,
  *        get_user, list_users,
  *        create_comment, list_comments,
  *        get_page_property, update_database_properties, add_database_property, remove_database_property,
  *        get_relation_pages, update_relation, add_relation_item,
  *        get_rollup_value,
- *        get_workspace_info, list_integrations
+ *        get_workspace_info, list_integrations,
+ *        describe_ai_features,
+ *        export_page_markdown, export_database_csv
  *
  * Auth: NOTION_API_KEY environment variable (Notion integration token)
  * Transport: stdio (default) or HTTP (MCP_TRANSPORT=http)
@@ -60,6 +68,8 @@ async function main() {
     import("./tools/relations.js").then((m) => m.getTools(client)),
     import("./tools/rollups.js").then((m) => m.getTools(client)),
     import("./tools/workspace.js").then((m) => m.getTools(client)),
+    import("./tools/ai_blocks.js").then((m) => m.getTools(client)),
+    import("./tools/exports.js").then((m) => m.getTools(client)),
   ]);
 
   // Build handler map
